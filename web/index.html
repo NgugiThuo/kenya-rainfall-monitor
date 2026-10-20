@@ -1,0 +1,351 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Kenya rainfall vs. normal</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Public+Sans:wght@400;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
+<style>
+  :root {
+    --ink: #1f2a2e;
+    --muted: #5b6a6f;
+    --paper: #ffffff;
+    --line: #d9dfe0;
+    --dry: #8c510a;
+    --wet: #01665e;
+    --focus: #0b5cad;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    font-family: "Public Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+    color: var(--ink);
+    background: var(--paper);
+    display: grid;
+    grid-template-columns: 320px 1fr;
+    grid-template-rows: minmax(0, 1fr);
+  }
+  aside {
+    padding: 24px 22px;
+    overflow-y: auto;
+    border-right: 1px solid var(--line);
+    display: flex;
+    flex-direction: column;
+    gap: 20px;
+  }
+  h1 { font-size: 1.45rem; line-height: 1.2; margin: 0 0 6px; font-weight: 700; }
+  .lede { margin: 0; color: var(--muted); font-size: 0.92rem; line-height: 1.5; }
+  label, legend { font-weight: 600; font-size: 0.9rem; }
+  fieldset { border: 0; padding: 0; margin: 0; }
+  select {
+    display: block; width: 100%; margin-top: 6px; padding: 9px 10px;
+    font: inherit; border: 1px solid var(--line); border-radius: 6px; background: #fff;
+  }
+  .choice { display: flex; align-items: center; gap: 8px; margin-top: 8px; font-weight: 400; font-size: 0.95rem; }
+  select:focus-visible, input:focus-visible { outline: 3px solid var(--focus); outline-offset: 2px; }
+  #summary { font-size: 0.95rem; line-height: 1.45; min-height: 2.9em; }
+  #summary strong { font-size: 1.15rem; }
+  .legend { list-style: none; margin: 8px 0 0; padding: 0; }
+  .legend li { display: flex; align-items: center; gap: 10px; font-size: 0.88rem; padding: 3px 0; }
+  .swatch { width: 22px; height: 14px; border: 1px solid rgba(0,0,0,.25); flex: none; }
+  .note { font-size: 0.8rem; color: var(--muted); line-height: 1.5; margin-top: auto; }
+  #error {
+    display: none; padding: 10px 12px; border-left: 4px solid var(--dry);
+    background: #faf3e8; font-size: 0.9rem; line-height: 1.45;
+  }
+  #map { height: 100%; min-height: 320px; }
+  .leaflet-popup-content { margin: 12px 14px; font-family: inherit; }
+  .pop h2 { font-size: 1rem; margin: 0 0 2px; }
+  .pop p { margin: 0 0 8px; font-size: 0.85rem; color: var(--muted); }
+  .pop svg { display: block; }
+  .pop .key { font-size: 0.75rem; color: var(--muted); margin-top: 4px; }
+
+  @media (max-width: 760px) {
+    body { grid-template-columns: 1fr; grid-template-rows: auto 1fr; }
+    aside { border-right: 0; border-bottom: 1px solid var(--line); max-height: 52vh; padding: 16px; gap: 14px; }
+    .note { margin-top: 0; }
+  }
+</style>
+</head>
+<body>
+<aside>
+  <div>
+    <h1>Kenya rainfall vs. normal</h1>
+    <p class="lede">Monthly satellite rainfall by county, compared with the 1991–2020 average for the same month.</p>
+  </div>
+
+  <div id="error" role="alert"></div>
+
+  <div>
+    <label for="month">Month</label>
+    <select id="month" disabled><option>Loading…</option></select>
+  </div>
+
+  <fieldset>
+    <legend>Show</legend>
+    <label class="choice"><input type="radio" name="metric" value="pct" checked> Percent of normal</label>
+    <label class="choice"><input type="radio" name="metric" value="mm"> Rainfall (mm)</label>
+  </fieldset>
+
+  <div id="summary" aria-live="polite"></div>
+
+  <div>
+    <strong style="font-size:.9rem" id="legend-title">Percent of normal</strong>
+    <ul class="legend" id="legend"></ul>
+  </div>
+
+  <p class="note">
+    Source: CHIRPS rainfall, processed in Google Earth Engine. Values are county averages of a
+    satellite-and-station estimate, so local conditions can differ. This shows what has fallen,
+    not a forecast. Colour scale from ColorBrewer.
+  </p>
+</aside>
+<div id="map" role="application" aria-label="Map of Kenyan counties coloured by rainfall"></div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+<script>
+const API = new URLSearchParams(location.search).get("api") || "http://localhost:8000";
+const MONTH_NAMES = ["January","February","March","April","May","June","July","August","September","October","November","December"];
+
+// Bins are [min, next min). Dry colours are brown, wet colours are teal.
+const BINS = {
+  pct: [
+    { min: -Infinity, color: "#8c510a", label: "Under 50%" },
+    { min: 50,  color: "#bf812d", label: "50–75%" },
+    { min: 75,  color: "#dfc27d", label: "75–90%" },
+    { min: 90,  color: "#f1ece0", label: "90–110% (near normal)" },
+    { min: 110, color: "#80cdc1", label: "110–130%" },
+    { min: 130, color: "#35978f", label: "130–160%" },
+    { min: 160, color: "#01665e", label: "Over 160%" },
+  ],
+  mm: [
+    { min: -Infinity, color: "#eef3f0", label: "Under 10 mm" },
+    { min: 10,  color: "#cfe3dc", label: "10–50 mm" },
+    { min: 50,  color: "#9fcdc4", label: "50–100 mm" },
+    { min: 100, color: "#5eaaa8", label: "100–200 mm" },
+    { min: 200, color: "#2f7f8a", label: "200–300 mm" },
+    { min: 300, color: "#17506b", label: "Over 300 mm" },
+  ],
+};
+const NO_DATA = "#d0d0d0";
+
+const state = { metric: "pct", year: null, month: null, data: null, layer: null, fitted: false };
+const seriesCache = new Map();
+
+const map = L.map("map", { zoomControl: true }).setView([0.2, 37.9], 6);
+L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
+  attribution: "&copy; <a href='https://www.openstreetmap.org/copyright'>OpenStreetMap</a> contributors",
+  maxZoom: 12,
+}).addTo(map);
+
+const el = (id) => document.getElementById(id);
+
+function showError(msg) {
+  const box = el("error");
+  box.textContent = msg;
+  box.style.display = "block";
+}
+
+function valueOf(props) {
+  return state.metric === "pct" ? props.pct_of_normal : props.rain_mm;
+}
+
+function colorFor(value) {
+  if (value === null || value === undefined) return NO_DATA;
+  const bins = BINS[state.metric];
+  let color = bins[0].color;
+  for (const b of bins) if (value >= b.min) color = b.color;
+  return color;
+}
+
+function describe(props) {
+  const mm = `${props.rain_mm.toFixed(0)} mm`;
+  if (props.pct_of_normal === null) return `${mm} (no normal: usually dry this month)`;
+  return `${mm} · ${props.pct_of_normal.toFixed(0)}% of normal`;
+}
+
+function renderLegend() {
+  const title = state.metric === "pct" ? "Percent of normal" : "Rainfall (mm)";
+  el("legend-title").textContent = title;
+  const list = el("legend");
+  list.replaceChildren();
+  for (const b of BINS[state.metric]) {
+    const li = document.createElement("li");
+    const sw = document.createElement("span");
+    sw.className = "swatch";
+    sw.style.background = b.color;
+    li.append(sw, b.label);
+    list.append(li);
+  }
+  if (state.metric === "pct") {
+    const li = document.createElement("li");
+    const sw = document.createElement("span");
+    sw.className = "swatch";
+    sw.style.background = NO_DATA;
+    li.append(sw, "No normal (usually dry)");
+    list.append(li);
+  }
+}
+
+function renderSummary() {
+  const feats = state.data.features;
+  const low = feats.filter((f) => f.properties.pct_of_normal !== null && f.properties.pct_of_normal < 75);
+  const box = el("summary");
+  box.replaceChildren();
+  const strong = document.createElement("strong");
+  strong.textContent = `${low.length} of ${feats.length}`;
+  box.append(strong, " counties received less than 75% of normal rainfall in ",
+    `${MONTH_NAMES[state.month - 1]} ${state.year}.`);
+}
+
+function styleFeature(feature) {
+  return {
+    fillColor: colorFor(valueOf(feature.properties)),
+    fillOpacity: 0.85,
+    color: "#ffffff",
+    weight: 1,
+  };
+}
+
+function chartFor(rows) {
+  const W = 280, H = 120, padL = 30, padB = 18, padT = 6;
+  const maxV = Math.max(...rows.map((r) => Math.max(r.rain_mm, r.baseline_mm)), 1);
+  const bw = (W - padL) / rows.length;
+  const y = (v) => padT + (H - padT - padB) * (1 - v / maxV);
+  const ns = "http://www.w3.org/2000/svg";
+  const svg = document.createElementNS(ns, "svg");
+  svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
+  svg.setAttribute("width", W);
+  svg.setAttribute("height", H);
+  svg.setAttribute("role", "img");
+  const t = document.createElementNS(ns, "title");
+  t.textContent = "Monthly rainfall (bars) against the 1991–2020 average for that month (line)";
+  svg.append(t);
+
+  rows.forEach((r, i) => {
+    const bar = document.createElementNS(ns, "rect");
+    bar.setAttribute("x", padL + i * bw + 0.5);
+    bar.setAttribute("width", Math.max(bw - 1, 1));
+    bar.setAttribute("y", y(r.rain_mm));
+    bar.setAttribute("height", H - padB - y(r.rain_mm));
+    bar.setAttribute("fill", "#35978f");
+    svg.append(bar);
+  });
+
+  const line = document.createElementNS(ns, "polyline");
+  line.setAttribute("points", rows.map((r, i) => `${padL + i * bw + bw / 2},${y(r.baseline_mm)}`).join(" "));
+  line.setAttribute("fill", "none");
+  line.setAttribute("stroke", "#8c510a");
+  line.setAttribute("stroke-width", "1.5");
+  svg.append(line);
+
+  const label = (x, yy, text, anchor) => {
+    const tx = document.createElementNS(ns, "text");
+    tx.setAttribute("x", x); tx.setAttribute("y", yy);
+    tx.setAttribute("font-size", "9"); tx.setAttribute("fill", "#5b6a6f");
+    tx.setAttribute("text-anchor", anchor);
+    tx.textContent = text;
+    svg.append(tx);
+  };
+  const short = (r) => `${MONTH_NAMES[r.month - 1].slice(0, 3)} ${r.year}`;
+  label(padL - 4, padT + 8, `${Math.round(maxV)}`, "end");
+  label(padL - 4, H - padB, "0", "end");
+  label(padL, H - 4, short(rows[0]), "start");
+  label(W, H - 4, short(rows[rows.length - 1]), "end");
+  return svg;
+}
+
+async function openPopup(latlng, props) {
+  const box = document.createElement("div");
+  box.className = "pop";
+  const h = document.createElement("h2");
+  h.textContent = props.county;
+  const p = document.createElement("p");
+  p.textContent = describe(props);
+  box.append(h, p);
+  const popup = L.popup({ maxWidth: 320 }).setLatLng(latlng).setContent(box).openOn(map);
+
+  try {
+    if (!seriesCache.has(props.county)) {
+      const res = await fetch(`${API}/counties/${encodeURIComponent(props.county)}/series?n=36`);
+      if (!res.ok) throw new Error(res.status);
+      seriesCache.set(props.county, await res.json());
+    }
+    box.append(chartFor(seriesCache.get(props.county)));
+    const key = document.createElement("div");
+    key.className = "key";
+    key.textContent = "Bars: monthly rainfall. Line: 1991–2020 average. Last 36 months.";
+    box.append(key);
+    popup.update();
+  } catch {
+    const msg = document.createElement("p");
+    msg.textContent = "Could not load the history for this county.";
+    box.append(msg);
+  }
+}
+
+function onEachFeature(feature, layer) {
+  layer.bindTooltip(`${feature.properties.county}: ${describe(feature.properties)}`, { sticky: true });
+  layer.on("click", (e) => openPopup(e.latlng, feature.properties));
+}
+
+function redraw() {
+  if (state.layer) state.layer.remove();
+  state.layer = L.geoJSON(state.data, { style: styleFeature, onEachFeature }).addTo(map);
+  if (!state.fitted) {
+    map.invalidateSize();  // re-measure the container now that the page has laid out
+    map.fitBounds(state.layer.getBounds(), { padding: [20, 20] });
+    state.fitted = true;
+  }
+  renderLegend();
+  renderSummary();
+}
+
+async function loadMonth() {
+  el("error").style.display = "none";
+  try {
+    const res = await fetch(`${API}/rainfall?year=${state.year}&month=${state.month}`);
+    if (!res.ok) throw new Error(`API returned ${res.status}`);
+    state.data = await res.json();
+    redraw();
+  } catch (err) {
+    showError(`Could not load rainfall data from ${API}. Check that the API is running (docker compose up) and the data has been loaded.`);
+  }
+}
+
+async function init() {
+  try {
+    const res = await fetch(`${API}/months`);
+    if (!res.ok) throw new Error(res.status);
+    const months = await res.json();
+    if (!months.length) throw new Error("empty");
+    const select = el("month");
+    select.replaceChildren(...months.map((ym) => {
+      const [y, m] = ym.split("-").map(Number);
+      const o = document.createElement("option");
+      o.value = ym;
+      o.textContent = `${MONTH_NAMES[m - 1]} ${y}`;
+      return o;
+    }));
+    select.disabled = false;
+    [state.year, state.month] = months[0].split("-").map(Number);
+    select.addEventListener("change", () => {
+      [state.year, state.month] = select.value.split("-").map(Number);
+      loadMonth();
+    });
+    document.querySelectorAll("input[name=metric]").forEach((r) =>
+      r.addEventListener("change", () => { state.metric = r.value; if (state.data) redraw(); }));
+    renderLegend();
+    loadMonth();
+  } catch {
+    el("month").replaceChildren(new Option("No data", ""));
+    showError(`Could not reach the API at ${API}. Start it with "docker compose up" and load the data (see the README).`);
+  }
+}
+init();
+</script>
+</body>
+</html>
