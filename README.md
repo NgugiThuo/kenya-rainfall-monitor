@@ -5,8 +5,7 @@ Built to practise the full path from satellite data to a deployed geospatial web
 Earth Engine processing in Python, a PostGIS database, a FastAPI service that returns GeoJSON,
 and a Leaflet front end, all run with Docker Compose.
 
-**Live demo:** _add link once deployed_  
-**Screenshot:** _add `docs/screenshot.png`_
+
 
 ## What it shows
 
